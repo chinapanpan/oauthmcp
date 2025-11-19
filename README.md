@@ -223,6 +223,69 @@ DEMO_MODE=true
 | `/api/data/:id` | PUT | 更新数据 | write |
 | `/api/data/:id` | DELETE | 删除数据 | write |
 
+## 🎯 在 Cursor 中使用
+
+### 配置 MCP 服务器
+
+在 Cursor 的 MCP 配置文件中添加以下配置：
+
+**macOS/Linux**: `~/.cursor/mcp.json`  
+**Windows**: `%APPDATA%\Cursor\mcp.json`
+
+```json
+{
+  "mcpServers": {
+    "oauth-mcp-demo": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "http://127.0.0.1:5001/mcp/v1"
+      ]
+    }
+  }
+}
+```
+
+### 使用步骤
+
+1. **启动服务器**：
+   ```bash
+   # 方式 1：使用 Python 脚本（推荐）
+   python start_servers.py
+   
+   # 方式 2：手动启动（如果脚本有问题）
+   source venv/bin/activate
+   export AUTHLIB_INSECURE_TRANSPORT=1
+   python oauth_server.py > log/oauth.log 2>&1 &
+   python mcp_server.py > log/mcp.log 2>&1 &
+   ```
+
+2. **重启 Cursor**：配置文件修改后需要重启 Cursor
+
+3. **验证连接**：在 Cursor 的日志中应该看到：
+   ```
+   Connected to remote server using StreamableHTTPClientTransport
+   Proxy established successfully
+   Found 6 tools, 0 prompts, and 0 resources
+   ```
+
+4. **使用工具**：
+   - 首先对 AI 说："请调用 oauth_authenticate 工具进行认证"
+   - 然后可以使用自然语言调用其他工具，例如："帮我获取所有数据"
+   
+   详细使用指南请查看 [CURSOR_USAGE.md](CURSOR_USAGE.md)
+
+### 可用工具
+
+| 工具名称 | 说明 | 参数 |
+|---------|------|------|
+| `oauth_authenticate` | 获取 OAuth 访问令牌 | 无 |
+| `get_user_profile` | 获取用户资料 | 无 |
+| `get_data` | 获取数据列表 | 无 |
+| `create_data` | 创建新数据 | `name`, `value` |
+| `update_data` | 更新数据 | `item_id`, `name`, `value` |
+| `delete_data` | 删除数据 | `item_id` |
+
 ## 🧪 测试示例
 
 ### 1. 测试 OAuth 流程
@@ -345,6 +408,24 @@ curl -X POST http://127.0.0.1:5001/mcp/v1/tools/call \
 10. **CORS 限制**：限制允许的来源域名，不要使用 `*`
 
 ## 🔍 故障排查
+
+### 问题：Cursor 无法连接到 MCP 服务器
+
+**症状**：Cursor 显示 "Cannot read properties of undefined (reading 'value')" 错误
+
+**原因**：MCP 服务器需要返回 JSON-RPC 2.0 格式的响应，而不是普通的 JSON 对象。
+
+**解决方案**：
+- 确保使用最新版本的 `mcp_server.py`（已实现 JSON-RPC 支持）
+- 重启 MCP 服务器
+- 测试 JSON-RPC 格式是否正确：
+  ```bash
+  curl -X POST http://127.0.0.1:5001/mcp/v1 \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0.0"}}}'
+  ```
+  
+  应该返回包含 `"jsonrpc": "2.0"` 和 `"result"` 字段的响应。
 
 ### 问题：无法连接到服务器
 

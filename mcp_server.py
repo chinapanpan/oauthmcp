@@ -504,174 +504,228 @@ def mcp_base():
             }
         })
     elif request.method == 'POST':
-        # Handle POST requests by forwarding to initialize
-        return mcp_initialize()
+        # Handle POST requests as JSON-RPC
+        return handle_jsonrpc_request()
+
+
+def handle_jsonrpc_request():
+    """Handle JSON-RPC 2.0 requests."""
+    data = request.get_json()
+    logger.info(f"JSON-RPC request: {data}")
+    
+    # Extract JSON-RPC fields
+    jsonrpc = data.get('jsonrpc', '2.0')
+    request_id = data.get('id')
+    method = data.get('method')
+    params = data.get('params', {})
+    
+    try:
+        # Handle notifications (no response needed)
+        if method and method.startswith('notifications/'):
+            logger.info(f"Received notification: {method}")
+            # Notifications don't get a response in JSON-RPC 2.0
+            return '', 204
+        
+        if method == 'initialize':
+            result = {
+                'protocolVersion': '2024-11-05',
+                'capabilities': {
+                    'tools': {
+                        'listChanged': False
+                    },
+                    'experimental': {
+                        'authorization': {
+                            'oauth2': {
+                                'authorizationEndpoint': config.AUTHORIZATION_ENDPOINT,
+                                'tokenEndpoint': config.TOKEN_ENDPOINT,
+                                'clientRegistrationEndpoint': config.REGISTRATION_ENDPOINT,
+                                'scopes': ['read', 'write']
+                            }
+                        }
+                    }
+                },
+                'serverInfo': {
+                    'name': 'oauth-mcp-demo',
+                    'version': '1.0.0'
+                }
+            }
+        elif method == 'tools/list':
+            result = {
+                'tools': [
+                    {
+                        'name': 'oauth_authenticate',
+                        'description': 'Authenticate with OAuth server and obtain access token',
+                        'inputSchema': {
+                            'type': 'object',
+                            'properties': {},
+                            'required': [],
+                        }
+                    },
+                    {
+                        'name': 'get_user_profile',
+                        'description': 'Get user profile from resource server (requires authentication)',
+                        'inputSchema': {
+                            'type': 'object',
+                            'properties': {},
+                            'required': [],
+                        }
+                    },
+                    {
+                        'name': 'get_data',
+                        'description': 'Get data from resource server (requires authentication and read scope)',
+                        'inputSchema': {
+                            'type': 'object',
+                            'properties': {},
+                            'required': [],
+                        }
+                    },
+                    {
+                        'name': 'create_data',
+                        'description': 'Create new data on resource server (requires authentication and write scope)',
+                        'inputSchema': {
+                            'type': 'object',
+                            'properties': {
+                                'name': {
+                                    'type': 'string',
+                                    'description': 'Name of the item to create',
+                                },
+                                'value': {
+                                    'type': 'number',
+                                    'description': 'Value of the item',
+                                },
+                            },
+                            'required': ['name', 'value'],
+                        }
+                    },
+                    {
+                        'name': 'update_data',
+                        'description': 'Update existing data on resource server (requires authentication and write scope)',
+                        'inputSchema': {
+                            'type': 'object',
+                            'properties': {
+                                'item_id': {
+                                    'type': 'number',
+                                    'description': 'ID of the item to update',
+                                },
+                                'name': {
+                                    'type': 'string',
+                                    'description': 'New name of the item',
+                                },
+                                'value': {
+                                    'type': 'number',
+                                    'description': 'New value of the item',
+                                },
+                            },
+                            'required': ['item_id', 'name', 'value'],
+                        }
+                    },
+                    {
+                        'name': 'delete_data',
+                        'description': 'Delete data from resource server (requires authentication and write scope)',
+                        'inputSchema': {
+                            'type': 'object',
+                            'properties': {
+                                'item_id': {
+                                    'type': 'number',
+                                    'description': 'ID of the item to delete',
+                                },
+                            },
+                            'required': ['item_id'],
+                        }
+                    },
+                ]
+            }
+        elif method == 'tools/call':
+            tool_name = params.get('name')
+            arguments = params.get('arguments', {})
+            
+            # Run async function in sync context
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result = loop.run_until_complete(handle_mcp_tool_call(tool_name, arguments))
+            finally:
+                loop.close()
+        else:
+            return jsonify({
+                'jsonrpc': jsonrpc,
+                'id': request_id,
+                'error': {
+                    'code': -32601,
+                    'message': f'Method not found: {method}'
+                }
+            }), 404
+        
+        return jsonify({
+            'jsonrpc': jsonrpc,
+            'id': request_id,
+            'result': result
+        })
+    
+    except Exception as e:
+        logger.error(f"Error handling JSON-RPC request: {e}", exc_info=True)
+        return jsonify({
+            'jsonrpc': jsonrpc,
+            'id': request_id,
+            'error': {
+                'code': -32603,
+                'message': str(e)
+            }
+        }), 500
 
 
 @app.route('/mcp/v1/initialize', methods=['POST'])
 def mcp_initialize():
-    """MCP initialization endpoint."""
-    data = request.get_json()
-    logger.info(f"MCP Initialize request: {data}")
-    
-    response = {
-        'protocolVersion': '2024-11-05',
-        'capabilities': {
-            'tools': {
-                'listChanged': False
-            },
-            'experimental': {
-                'authorization': {
-                    'oauth2': {
-                        'authorizationEndpoint': config.AUTHORIZATION_ENDPOINT,
-                        'tokenEndpoint': config.TOKEN_ENDPOINT,
-                        'clientRegistrationEndpoint': config.REGISTRATION_ENDPOINT,
-                        'scopes': ['read', 'write']
-                    }
-                }
-            }
-        },
-        'serverInfo': {
-            'name': 'oauth-mcp-demo',
-            'version': '1.0.0'
-        }
-    }
-    
-    return jsonify(response)
+    """MCP initialization endpoint (legacy, redirects to JSON-RPC handler)."""
+    return handle_jsonrpc_request()
 
 
 @app.route('/mcp/v1/tools/list', methods=['POST'])
 def mcp_list_tools():
-    """List available MCP tools."""
-    tools = [
-        {
-            'name': 'oauth_authenticate',
-            'description': 'Authenticate with OAuth server and obtain access token',
-            'inputSchema': {
-                'type': 'object',
-                'properties': {},
-                'required': [],
-            }
-        },
-        {
-            'name': 'get_user_profile',
-            'description': 'Get user profile from resource server (requires authentication)',
-            'inputSchema': {
-                'type': 'object',
-                'properties': {},
-                'required': [],
-            }
-        },
-        {
-            'name': 'get_data',
-            'description': 'Get data from resource server (requires authentication and read scope)',
-            'inputSchema': {
-                'type': 'object',
-                'properties': {},
-                'required': [],
-            }
-        },
-        {
-            'name': 'create_data',
-            'description': 'Create new data on resource server (requires authentication and write scope)',
-            'inputSchema': {
-                'type': 'object',
-                'properties': {
-                    'name': {
-                        'type': 'string',
-                        'description': 'Name of the item to create',
-                    },
-                    'value': {
-                        'type': 'number',
-                        'description': 'Value of the item',
-                    },
-                },
-                'required': ['name', 'value'],
-            }
-        },
-        {
-            'name': 'update_data',
-            'description': 'Update existing data on resource server (requires authentication and write scope)',
-            'inputSchema': {
-                'type': 'object',
-                'properties': {
-                    'item_id': {
-                        'type': 'number',
-                        'description': 'ID of the item to update',
-                    },
-                    'name': {
-                        'type': 'string',
-                        'description': 'New name of the item',
-                    },
-                    'value': {
-                        'type': 'number',
-                        'description': 'New value of the item',
-                    },
-                },
-                'required': ['item_id', 'name', 'value'],
-            }
-        },
-        {
-            'name': 'delete_data',
-            'description': 'Delete data from resource server (requires authentication and write scope)',
-            'inputSchema': {
-                'type': 'object',
-                'properties': {
-                    'item_id': {
-                        'type': 'number',
-                        'description': 'ID of the item to delete',
-                    },
-                },
-                'required': ['item_id'],
-            }
-        },
-    ]
-    
-    return jsonify({'tools': tools})
+    """List available MCP tools (legacy, redirects to JSON-RPC handler)."""
+    return handle_jsonrpc_request()
 
 
 @app.route('/mcp/v1/tools/call', methods=['POST'])
 def mcp_call_tool():
-    """Call an MCP tool."""
-    data = request.get_json()
-    tool_name = data.get('name')
-    arguments = data.get('arguments', {})
-    
-    logger.info(f"MCP Tool call: {tool_name} with args: {arguments}")
-    
-    # Run async function in sync context
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        result = loop.run_until_complete(handle_mcp_tool_call(tool_name, arguments))
-        return jsonify(result)
-    finally:
-        loop.close()
+    """Call an MCP tool (legacy, redirects to JSON-RPC handler)."""
+    return handle_jsonrpc_request()
 
 
-@app.route('/mcp/v1/sse', methods=['GET'])
+@app.route('/mcp/v1/sse', methods=['GET', 'POST'])
 def mcp_sse():
     """MCP Server-Sent Events endpoint for streaming."""
-    def generate():
-        # Send initial connection message
-        yield f"data: {json.dumps({'type': 'connected', 'timestamp': time.time()})}\n\n"
+    if request.method == 'GET':
+        # SSE stream
+        def generate():
+            # Send initial connection message
+            yield f"data: {json.dumps({'type': 'connected', 'timestamp': time.time()})}\n\n"
+            
+            # Keep connection alive
+            while True:
+                time.sleep(30)  # Send keepalive every 30 seconds
+                yield f"data: {json.dumps({'type': 'keepalive', 'timestamp': time.time()})}\n\n"
         
-        # Keep connection alive
-        while True:
-            time.sleep(30)  # Send keepalive every 30 seconds
-            yield f"data: {json.dumps({'type': 'keepalive', 'timestamp': time.time()})}\n\n"
-    
-    return Response(
-        stream_with_context(generate()),
-        mimetype='text/event-stream',
-        headers={
-            'Cache-Control': 'no-cache',
-            'X-Accel-Buffering': 'no',
-            'Connection': 'keep-alive',
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-        }
-    )
+        return Response(
+            stream_with_context(generate()),
+            mimetype='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'X-Accel-Buffering': 'no',
+                'Connection': 'keep-alive',
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+            }
+        )
+    else:
+        # POST request - handle as JSON-RPC message
+        return handle_jsonrpc_request()
+
+
+@app.route('/mcp/v1/message', methods=['POST'])
+def mcp_message():
+    """MCP message endpoint for SSE transport."""
+    return handle_jsonrpc_request()
 
 
 @app.route('/.well-known/oauth-protected-resource', methods=['GET'])
