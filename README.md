@@ -223,6 +223,21 @@ DEMO_MODE=true
 | `/api/data/:id` | PUT | 更新数据 | write |
 | `/api/data/:id` | DELETE | 删除数据 | write |
 
+## 💡 OAuth 流程说明
+
+本项目实现了**自动 OAuth 认证模式**：
+
+- ✅ **完全自动化**：在 MCP 初始化时自动触发 OAuth 流程
+- ✅ **无需手动认证**：用户可以直接使用工具，无需先调用 `oauth_authenticate`
+- ✅ **服务器管理 Token**：Token 由 MCP 服务器自动管理和刷新
+- ✅ **适合演示学习**：更容易理解 OAuth + MCP 的集成
+
+**工作流程**：
+1. Cursor 连接 MCP 服务器（initialize）
+2. 服务器自动向 OAuth 服务器注册客户端并获取 token
+3. 所有工具调用自动使用存储的 token
+4. 用户完全无感知，直接使用即可
+
 ## 🎯 在 Cursor 中使用
 
 ### 配置 MCP 服务器
@@ -270,10 +285,9 @@ DEMO_MODE=true
    ```
 
 4. **使用工具**：
-   - 首先对 AI 说："请调用 oauth_authenticate 工具进行认证"
-   - 然后可以使用自然语言调用其他工具，例如："帮我获取所有数据"
-   
-   详细使用指南请查看 [CURSOR_USAGE.md](CURSOR_USAGE.md)
+   - **无需手动认证！** 直接对 AI 说："帮我获取所有数据"
+   - OAuth 认证会在后台自动完成
+   - 支持的操作：获取数据、创建数据、更新数据、删除数据等
 
 ### 可用工具
 

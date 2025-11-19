@@ -41,7 +41,11 @@ oauth_client = {
     'client_secret': None,
     'access_token': None,
     'refresh_token': None,
+    'initialized': False,
 }
+
+# Flag to track if auto-initialization is in progress
+_auto_init_lock = False
 
 # In-memory data storage (for demo)
 data_store = [
@@ -330,6 +334,42 @@ async def get_access_token(client_id: str, client_secret: str) -> dict:
             raise
 
 
+async def auto_initialize_oauth():
+    """Automatically initialize OAuth on server startup."""
+    global _auto_init_lock
+    
+    if oauth_client['initialized'] or _auto_init_lock:
+        return
+    
+    _auto_init_lock = True
+    try:
+        logger.info("🔐 Auto-initializing OAuth...")
+        
+        # Register client if not already registered
+        if not oauth_client['client_id']:
+            client_info = await register_oauth_client()
+            oauth_client['client_id'] = client_info['client_id']
+            oauth_client['client_secret'] = client_info['client_secret']
+            logger.info(f"✓ Client registered: {client_info['client_id']}")
+        
+        # Get access token
+        token_response = await get_access_token(
+            oauth_client['client_id'],
+            oauth_client['client_secret']
+        )
+        oauth_client['access_token'] = token_response['access_token']
+        if 'refresh_token' in token_response:
+            oauth_client['refresh_token'] = token_response['refresh_token']
+        
+        oauth_client['initialized'] = True
+        logger.info("✓ OAuth auto-initialization completed")
+        
+    except Exception as e:
+        logger.error(f"✗ OAuth auto-initialization failed: {e}")
+    finally:
+        _auto_init_lock = False
+
+
 async def handle_mcp_tool_call(tool_name: str, arguments: dict) -> dict:
     """Handle MCP tool calls."""
     try:
@@ -363,9 +403,6 @@ async def handle_mcp_tool_call(tool_name: str, arguments: dict) -> dict:
             }
         
         elif tool_name == "get_user_profile":
-            if not oauth_client['access_token']:
-                raise ValueError("Not authenticated. Please call oauth_authenticate first.")
-            
             # Call local API
             headers = {'Authorization': f"Bearer {oauth_client['access_token']}"}
             async with httpx.AsyncClient() as client:
@@ -384,9 +421,6 @@ async def handle_mcp_tool_call(tool_name: str, arguments: dict) -> dict:
             }
         
         elif tool_name == "get_data":
-            if not oauth_client['access_token']:
-                raise ValueError("Not authenticated. Please call oauth_authenticate first.")
-            
             headers = {'Authorization': f"Bearer {oauth_client['access_token']}"}
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -404,9 +438,6 @@ async def handle_mcp_tool_call(tool_name: str, arguments: dict) -> dict:
             }
         
         elif tool_name == "create_data":
-            if not oauth_client['access_token']:
-                raise ValueError("Not authenticated. Please call oauth_authenticate first.")
-            
             headers = {'Authorization': f"Bearer {oauth_client['access_token']}"}
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -425,9 +456,6 @@ async def handle_mcp_tool_call(tool_name: str, arguments: dict) -> dict:
             }
         
         elif tool_name == "update_data":
-            if not oauth_client['access_token']:
-                raise ValueError("Not authenticated. Please call oauth_authenticate first.")
-            
             item_id = arguments.pop('item_id')
             headers = {'Authorization': f"Bearer {oauth_client['access_token']}"}
             async with httpx.AsyncClient() as client:
@@ -447,9 +475,6 @@ async def handle_mcp_tool_call(tool_name: str, arguments: dict) -> dict:
             }
         
         elif tool_name == "delete_data":
-            if not oauth_client['access_token']:
-                raise ValueError("Not authenticated. Please call oauth_authenticate first.")
-            
             item_id = arguments['item_id']
             headers = {'Authorization': f"Bearer {oauth_client['access_token']}"}
             async with httpx.AsyncClient() as client:
@@ -527,21 +552,69 @@ def handle_jsonrpc_request():
             return '', 204
         
         if method == 'initialize':
+            # Check if Authorization header is present
+            auth_header = request.headers.get('Authorization')
+            
+            if not auth_header:
+                # No token provided - return 401 with WWW-Authenticate header
+                logger.info("No authorization token, returning 401")
+                www_authenticate = (
+                    f'Bearer resource_metadata="{config.MCP_SERVER_URL}/.well-known/oauth-protected-resource"'
+                )
+                response = jsonify({
+                    'jsonrpc': jsonrpc,
+                    'id': request_id,
+                    'error': {
+                        'code': 401,
+                        'message': 'Unauthorized'
+                    }
+                })
+                response.status_code = 401
+                response.headers['WWW-Authenticate'] = www_authenticate
+                return response
+            
+            # Verify token
+            parts = auth_header.split()
+            if len(parts) != 2 or parts[0].lower() != 'bearer':
+                logger.info("Invalid authorization header format")
+                response = jsonify({
+                    'jsonrpc': jsonrpc,
+                    'id': request_id,
+                    'error': {
+                        'code': 401,
+                        'message': 'Invalid authorization header'
+                    }
+                })
+                response.status_code = 401
+                return response
+            
+            token = parts[1]
+            try:
+                claims = verify_token(token)
+                logger.info(f"Token verified for client: {claims.get('client_id')}")
+                
+                # Store token for this session (in real app, use session management)
+                oauth_client['access_token'] = token
+                oauth_client['initialized'] = True
+                
+            except ValueError as e:
+                logger.error(f"Token verification failed: {e}")
+                response = jsonify({
+                    'jsonrpc': jsonrpc,
+                    'id': request_id,
+                    'error': {
+                        'code': 401,
+                        'message': 'Invalid or expired token'
+                    }
+                })
+                response.status_code = 401
+                return response
+            
             result = {
                 'protocolVersion': '2024-11-05',
                 'capabilities': {
                     'tools': {
                         'listChanged': False
-                    },
-                    'experimental': {
-                        'authorization': {
-                            'oauth2': {
-                                'authorizationEndpoint': config.AUTHORIZATION_ENDPOINT,
-                                'tokenEndpoint': config.TOKEN_ENDPOINT,
-                                'clientRegistrationEndpoint': config.REGISTRATION_ENDPOINT,
-                                'scopes': ['read', 'write']
-                            }
-                        }
                     }
                 },
                 'serverInfo': {
@@ -550,92 +623,128 @@ def handle_jsonrpc_request():
                 }
             }
         elif method == 'tools/list':
+            # Require authentication for tools/list
+            if not oauth_client.get('initialized'):
+                logger.info("Tools list requested without authentication")
+                www_authenticate = (
+                    f'Bearer resource_metadata="{config.MCP_SERVER_URL}/.well-known/oauth-protected-resource"'
+                )
+                response = jsonify({
+                    'jsonrpc': jsonrpc,
+                    'id': request_id,
+                    'error': {
+                        'code': 401,
+                        'message': 'Unauthorized'
+                    }
+                })
+                response.status_code = 401
+                response.headers['WWW-Authenticate'] = www_authenticate
+                return response
+            
             result = {
                 'tools': [
                     {
                         'name': 'oauth_authenticate',
-                        'description': 'Authenticate with OAuth server and obtain access token',
-                        'inputSchema': {
-                            'type': 'object',
-                            'properties': {},
-                            'required': [],
-                        }
+            'description': 'Authenticate with OAuth server and obtain access token',
+            'inputSchema': {
+                'type': 'object',
+                'properties': {},
+                'required': [],
+            }
+        },
+        {
+            'name': 'get_user_profile',
+            'description': 'Get user profile from resource server (requires authentication)',
+            'inputSchema': {
+                'type': 'object',
+                'properties': {},
+                'required': [],
+            }
+        },
+        {
+            'name': 'get_data',
+            'description': 'Get data from resource server (requires authentication and read scope)',
+            'inputSchema': {
+                'type': 'object',
+                'properties': {},
+                'required': [],
+            }
+        },
+        {
+            'name': 'create_data',
+            'description': 'Create new data on resource server (requires authentication and write scope)',
+            'inputSchema': {
+                'type': 'object',
+                'properties': {
+                    'name': {
+                        'type': 'string',
+                        'description': 'Name of the item to create',
                     },
-                    {
-                        'name': 'get_user_profile',
-                        'description': 'Get user profile from resource server (requires authentication)',
-                        'inputSchema': {
-                            'type': 'object',
-                            'properties': {},
-                            'required': [],
-                        }
+                    'value': {
+                        'type': 'number',
+                        'description': 'Value of the item',
                     },
-                    {
-                        'name': 'get_data',
-                        'description': 'Get data from resource server (requires authentication and read scope)',
-                        'inputSchema': {
-                            'type': 'object',
-                            'properties': {},
-                            'required': [],
-                        }
+                },
+                'required': ['name', 'value'],
+            }
+        },
+        {
+            'name': 'update_data',
+            'description': 'Update existing data on resource server (requires authentication and write scope)',
+            'inputSchema': {
+                'type': 'object',
+                'properties': {
+                    'item_id': {
+                        'type': 'number',
+                        'description': 'ID of the item to update',
                     },
-                    {
-                        'name': 'create_data',
-                        'description': 'Create new data on resource server (requires authentication and write scope)',
-                        'inputSchema': {
-                            'type': 'object',
-                            'properties': {
-                                'name': {
-                                    'type': 'string',
-                                    'description': 'Name of the item to create',
-                                },
-                                'value': {
-                                    'type': 'number',
-                                    'description': 'Value of the item',
-                                },
-                            },
-                            'required': ['name', 'value'],
-                        }
+                    'name': {
+                        'type': 'string',
+                        'description': 'New name of the item',
                     },
-                    {
-                        'name': 'update_data',
-                        'description': 'Update existing data on resource server (requires authentication and write scope)',
-                        'inputSchema': {
-                            'type': 'object',
-                            'properties': {
-                                'item_id': {
-                                    'type': 'number',
-                                    'description': 'ID of the item to update',
-                                },
-                                'name': {
-                                    'type': 'string',
-                                    'description': 'New name of the item',
-                                },
-                                'value': {
-                                    'type': 'number',
-                                    'description': 'New value of the item',
-                                },
-                            },
-                            'required': ['item_id', 'name', 'value'],
-                        }
+                    'value': {
+                        'type': 'number',
+                        'description': 'New value of the item',
                     },
-                    {
-                        'name': 'delete_data',
-                        'description': 'Delete data from resource server (requires authentication and write scope)',
-                        'inputSchema': {
-                            'type': 'object',
-                            'properties': {
-                                'item_id': {
-                                    'type': 'number',
-                                    'description': 'ID of the item to delete',
-                                },
-                            },
-                            'required': ['item_id'],
-                        }
+                },
+                'required': ['item_id', 'name', 'value'],
+            }
+        },
+        {
+            'name': 'delete_data',
+            'description': 'Delete data from resource server (requires authentication and write scope)',
+            'inputSchema': {
+                'type': 'object',
+                'properties': {
+                    'item_id': {
+                        'type': 'number',
+                        'description': 'ID of the item to delete',
                     },
-                ]
+                },
+                'required': ['item_id'],
+            }
+        },
+    ]
             }
         elif method == 'tools/call':
+            # Require authentication for tools/call
+            if not oauth_client.get('initialized'):
+                logger.info("Tool call requested without authentication")
+                www_authenticate = (
+                    f'Bearer resource_metadata="{config.MCP_SERVER_URL}/.well-known/oauth-protected-resource"'
+                )
+                response = jsonify({
+                    'jsonrpc': jsonrpc,
+                    'id': request_id,
+                    'error': {
+                        'code': 401,
+                        'message': 'Unauthorized'
+                    }
+                })
+                response.status_code = 401
+                response.headers['WWW-Authenticate'] = www_authenticate
+                return response
+            
             tool_name = params.get('name')
             arguments = params.get('arguments', {})
             
