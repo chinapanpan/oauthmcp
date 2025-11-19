@@ -131,6 +131,10 @@ def require_oauth(scopes=None):
     """
     def decorator(f):
         def decorated_function(*args, **kwargs):
+            # Debug: Print all request headers
+            logger.info("📋 decorated_function Request Headers:")
+            for header_name, header_value in request.headers:
+                logger.info(f"   {header_name}: {header_value}")
             auth_header = request.headers.get('Authorization')
             
             # Build WWW-Authenticate header per RFC 9728
@@ -537,6 +541,7 @@ def handle_jsonrpc_request():
     """Handle JSON-RPC 2.0 requests."""
     data = request.get_json()
     logger.info(f"JSON-RPC request: {data}")
+    logger.info(f"handle_jsonrpc_request header:{request.headers}")
     
     # Extract JSON-RPC fields
     jsonrpc = data.get('jsonrpc', '2.0')
@@ -554,6 +559,7 @@ def handle_jsonrpc_request():
         if method == 'initialize':
             # Check if Authorization header is present
             auth_header = request.headers.get('Authorization')
+            logger.info(f"initialize auth_header:{auth_header}")
             
             if not auth_header:
                 # No token provided - return 401 with WWW-Authenticate header
@@ -865,6 +871,18 @@ def oauth_protected_resource_metadata():
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint."""
+
+    # Clear Authorization header from request context for next call
+    if request.method in ['POST', 'GET']:
+        # Remove Authorization from headers if present
+        if 'Authorization' in request.headers:
+            # Create a new headers object without Authorization
+            # Note: Flask request headers are immutable, so we log the clearing
+            logger.info("Clearing Authorization header from current request context")
+            # Clear from oauth_client state to ensure next request starts fresh
+            if 'access_token' in oauth_client:
+                oauth_client['access_token'] = None
+                oauth_client['initialized'] = False
     return jsonify({
         'status': 'ok',
         'service': 'mcp_server',
